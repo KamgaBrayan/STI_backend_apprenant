@@ -2,6 +2,10 @@ import os
 from datetime import timedelta
 from pathlib import Path
 import dj_database_url
+from dotenv import load_dotenv
+
+
+load_dotenv()
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -9,6 +13,7 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 # --- AJOUTEZ CES LIGNES MANQUANTES ---
 # SECURITY WARNING: keep the secret key used in production secret!
 SECRET_KEY = os.environ.get('SECRET_KEY', 'django-insecure-votre-cle-dev-ici')
+GOOGLE_API_KEY = os.environ.get('GOOGLE_API_KEY')
 
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = 'RENDER' not in os.environ

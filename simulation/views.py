@@ -4,10 +4,12 @@ from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
+from asgiref.sync import sync_to_async
 
 from .models import SimulationSession, ChatMessage, ActionLog
 from .serializers import SimulationSessionSerializer, SimulationDetailSerializer, ChatMessageSerializer
 from clinical_cases.models import ClinicalCase
+from .llm_service import get_patient_response_async
 
 from rest_framework import generics
 
@@ -44,28 +46,64 @@ class GetSimulationView(generics.RetrieveAPIView):
     lookup_field = 'uuid'
 
 class SendMessageView(APIView):
-    """Envoi d'un message par le Docteur + Réponse auto du Patient"""
-    permission_classes = [IsAuthenticated]
+    permission_classes = [] 
 
-    def post(self, request, session_uuid):
-        session = get_object_or_404(SimulationSession, uuid=session_uuid, user=request.user)
+    @sync_to_async
+    def get_session_and_history(self, session_uuid, user):
+        """Récupère tout ce dont on a besoin en un seul appel DB (ou presque)"""
+        session = get_object_or_404(SimulationSession, uuid=session_uuid, user=user)
+        
+        # Force la récupération des données JSON
+        case_data = session.clinical_case.case_data
+        
+        # Récupère l'historique sous forme de liste de dicts (plus léger pour l'async)
+        # On exclut 'system' car on le gère via system_instruction
+        msgs = session.messages.exclude(role='system').order_by('timestamp')
+        history = [{'role': m.role, 'content': m.content} for m in msgs]
+        
+        return session, case_data, history
+
+    @sync_to_async
+    def save_message(self, session, role, content):
+        return ChatMessage.objects.create(session=session, role=role, content=content)
+
+    async def post(self, request, session_uuid):
+        # 1. Validation basique
         content = request.data.get('content')
-
         if not content:
-            return Response({"error": "Content empty"}, status=status.HTTP_400_BAD_REQUEST)
+            return Response({"error": "Message vide"}, status=400)
 
-        # 1. Enregistrer le message du Docteur
-        doctor_msg = ChatMessage.objects.create(session=session, role='doctor', content=content)
+        try:
+            # 2. Récupération contexte (DB Sync -> Async)
+            session, case_data, history = await self.get_session_and_history(session_uuid, request.user)
 
-        # 2. (MOCK AI) Générer une réponse du Patient
-        # Plus tard, ici, on appellera votre Module Expert / LLM / RAG
-        patient_response_text = "Je comprends docteur. J'ai mal surtout quand je respire fort." 
-        patient_msg = ChatMessage.objects.create(session=session, role='patient', content=patient_response_text)
+            # 3. Sauvegarde message User
+            doctor_msg = await self.save_message(session, 'doctor', content)
 
-        return Response({
-            "doctor_message": ChatMessageSerializer(doctor_msg).data,
-            "patient_message": ChatMessageSerializer(patient_msg).data
-        })
+            # 4. Appel LLM (C'est ici que la magie Async opère)
+            # On ne bloque pas le thread Django principal
+            ai_response = await get_patient_response_async(case_data, history, content)
+
+            # 5. Sauvegarde réponse IA
+            patient_msg = await self.save_message(session, 'patient', ai_response)
+
+            # 6. Réponse API
+            return Response({
+                "doctor_message": {
+                    "role": doctor_msg.role, 
+                    "content": doctor_msg.content, 
+                    "timestamp": doctor_msg.timestamp
+                },
+                "patient_message": {
+                    "role": patient_msg.role, 
+                    "content": patient_msg.content, 
+                    "timestamp": patient_msg.timestamp
+                }
+            })
+
+        except Exception as e:
+            print(f"Erreur critique View: {e}")
+            return Response({"error": "Erreur serveur"}, status=500)
 
 class PerformActionView(APIView):
     """Enregistre une action (Examen, Diagnostic)"""
