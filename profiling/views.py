@@ -40,18 +40,18 @@ class GenerateTestView(APIView):
         # Appel au Tuteur IA
         questions = generate_adaptive_test(profile_data)
         
-        # On sauvegarde temporairement les bonnes réponses en session pour la correction
-        # (Attention : en production avec plusieurs workers, utiliser Redis ou DB est mieux)
-        request.session['current_test_answers'] = {q['id']: q['correct_answer'] for q in questions}
+        # 2. Sauvegarde dans la BDD (Au lieu de la session)
+        # On extrait les IDs et les bonnes réponses pour la correction future
+        correct_answers_map = {q['id']: q['correct_answer'] for q in questions}
+        profile.pending_test_data = correct_answers_map
+        profile.save()
         
-        # On retire les réponses de l'objet envoyé au front pour ne pas tricher
+        # 3. Nettoyage pour le Frontend (On enlève la réponse)
         questions_for_front = []
         for q in questions:
             q_copy = q.copy()
-            if 'correct_answer' in q_copy:
-                del q_copy['correct_answer']
-            if 'explanation' in q_copy:
-                del q_copy['explanation']
+            q_copy.pop('correct_answer', None)
+            q_copy.pop('explanation', None)
             questions_for_front.append(q_copy)
             
         return Response(questions_for_front)
@@ -63,41 +63,43 @@ class SubmitTestView(APIView):
     permission_classes = [IsAuthenticated]
 
     def post(self, request):
-        answers = request.data.get('answers', {})
-        correct_answers = request.session.get('current_test_answers', {})
+        profile = LearnerProfile.objects.get(user=request.user)
+        user_answers = request.data.get('answers', {})
         
-        # Si pas de session (ex: redémarrage serveur), fallback sur une logique simple ou erreur
+        # 1. Récupération des bonnes réponses depuis la BDD
+        correct_answers = profile.pending_test_data
+        
         if not correct_answers:
-            # Fallback temporaire pour éviter de bloquer le dev si la session est perdue
-            return Response({"error": "Session de test expirée. Veuillez régénérer le test."}, status=400)
+            # Cas rare : l'utilisateur soumet sans avoir généré
+            # On tente une correction via LLM ou on renvoie une erreur
+            return Response({"error": "Aucun test actif trouvé. Veuillez recharger la page."}, status=400)
 
+        # 2. Correction
         score = 0
         total = len(correct_answers)
 
-        for q_id, user_ans in answers.items():
-            if correct_answers.get(q_id) == user_ans:
+        for q_id, correct_val in correct_answers.items():
+            # On compare la réponse utilisateur avec la bonne réponse
+            if user_answers.get(q_id) == correct_val:
                 score += 1
         
         final_score_percent = (score / total) * 100 if total > 0 else 0
         
-        # Calibration (Logique Tuteur simple)
-        # Ici on pourrait rappeler le LLM pour un commentaire personnalisé
+        # 3. Calibration
         calibrated_level = "Novice"
-        if final_score_percent > 80:
-            calibrated_level = "Expert"
-        elif final_score_percent > 40:
-            calibrated_level = "Intermédiaire"
+        if final_score_percent > 80: calibrated_level = "Expert"
+        elif final_score_percent > 40: calibrated_level = "Intermédiaire"
 
-        # Sauvegarde
-        profile, _ = LearnerProfile.objects.get_or_create(user=request.user)
+        # 4. Sauvegarde Finale et Nettoyage
         profile.test_score = final_score_percent
         profile.calibrated_level = calibrated_level
+        profile.pending_test_data = {} # On vide le tampon
         profile.save()
 
         return Response({
             "test_score": final_score_percent,
             "calibrated_level": calibrated_level,
-            "message": "Analyse du Tuteur terminée."
+            "message": "Test validé avec succès."
         }, status=status.HTTP_200_OK)
     
 

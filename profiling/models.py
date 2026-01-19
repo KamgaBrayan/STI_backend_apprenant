@@ -16,6 +16,8 @@ class LearnerProfile(models.Model):
     
     # --- Etape 3 : Motivation ---
     motivation = models.TextField(blank=True, null=True)
+
+    pending_test_data = models.JSONField(default=dict, blank=True)
     
     # --- Etape 4 & 5 : Calibration (Test de positionnement) ---
     test_score = models.FloatField(default=0.0) # Score en %
