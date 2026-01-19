@@ -9,6 +9,8 @@ pip install -r requirements.txt
 python manage.py collectstatic --no-input
 
 # 3. Application des migrations (Mise à jour de la structure de la BDD)
+python manage.py migrate profiling 0002 --fake
+
 python manage.py migrate
 
 # 4. Synchronisation des Cas Cliniques (Seed)
