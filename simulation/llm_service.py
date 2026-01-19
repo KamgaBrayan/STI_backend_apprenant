@@ -11,9 +11,17 @@ from google.genai import types, errors
 
 logger = logging.getLogger(__name__)
 
-# Initialisation du client (Peut être global ou instancié dans la fonction)
-# On récupère la clé API depuis les settings
-client = genai.Client(api_key=settings.GOOGLE_API_KEY)
+def get_client():
+    api_key = getattr(settings, 'GOOGLE_API_KEY', None)
+    if not api_key:
+        # Fallback pour le dev local si settings échoue (mais .env est mieux)
+        api_key = os.environ.get("GOOGLE_API_KEY")
+    
+    if not api_key:
+        print("⚠️ ERREUR CRITIQUE: Clé API Google manquante !")
+        return None
+        
+    return genai.Client(api_key=api_key)
 
 # Configuration de sécurité (Pour éviter les blocages sur des termes médicaux)
 SAFETY_SETTINGS = [
@@ -51,6 +59,9 @@ async def call_gemini_async(contents, system_instruction):
     """
     Appel ASYNC au modèle avec le nouveau SDK google-genai.
     """
+    client = get_client() # <-- Ajout
+    if not client: raise ValueError("Client Google non initialisé")
+    
     try:
         # On utilise le client async (client.aio)
         response = await client.aio.models.generate_content(
@@ -73,6 +84,14 @@ async def get_patient_response_async(case_data, messages_history, user_message_c
     Point d'entrée principal.
     Transforme les données brutes en objets `types.Content` pour le SDK.
     """
+
+    # Initialisation du client ICI
+    client = get_client()
+    if not client:
+        return "Erreur technique : Le simulateur n'est pas configuré (Clé API manquante)."
+
+    # 1. Préparer le System Prompt
+    sys_instruction = build_system_instruction(case_data)
     
     # 1. Préparer le System Prompt
     sys_instruction = build_system_instruction(case_data)
