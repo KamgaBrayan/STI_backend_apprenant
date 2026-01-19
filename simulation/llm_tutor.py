@@ -52,6 +52,8 @@ def generate_adaptive_test(profile_data):
     """
     
     # 1. Extraction du contexte apprenant
+    langue_code = profile_data.get('language', 'fr')
+    langue_verbose = "Français" if langue_code == 'fr' else "Anglais (English)"
     niveau = profile_data.get('study_level', 'Non défini')
     specialite = profile_data.get('specialty', 'Médecine Générale')
     objs = profile_data.get('objectives', [])
@@ -66,9 +68,11 @@ def generate_adaptive_test(profile_data):
     - Spécialité visée : {specialite}
     - Objectifs : {objectifs}
     
+    IMPORTANT : TOUT LE CONTENU GÉNÉRÉ DOIT ÊTRE EN : {langue_verbose.upper()}
+
     TÂCHE :
     Génère un Quiz de positionnement de 15 questions à choix multiples (QCM).
-    Les questions doivent être adaptées au niveau et à la spécialité.
+    Les questions doivent être adaptées au niveau et à la spécialité choisié (une spécialité).
     Chaque question doit avoir 4 options (a, b, c, d) avec une seule bonne réponse.
     Fournis également une explication brève pour chaque bonne réponse.
     

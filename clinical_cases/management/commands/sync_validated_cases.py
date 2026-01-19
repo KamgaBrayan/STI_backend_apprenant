@@ -4,170 +4,142 @@ import json
 from django.core.management.base import BaseCommand
 from clinical_cases.models import ClinicalCase
 
-# URL de ton PREMIER backend (celui qui a les données Fultang)
-# Assure-toi que l'autre serveur tourne sur ce port (ex: 8000)
+# URL du Backend Expert
 DATA_BACKEND_URL = os.environ.get('DATA_BACKEND_URL', 'https://sti-5i2r.onrender.com/api/v1/cases/validated/')
 
 class Command(BaseCommand):
-    help = 'Récupère les cas validés depuis le Backend Data et peuple la base de simulation.'
+    help = 'Synchronise les cas cliniques validés depuis le module Expert.'
 
     def handle(self, *args, **options):
-        endpoint = f"{DATA_BACKEND_URL}/api/v1/cases/validated/"
-        
+        endpoint = DATA_BACKEND_URL
         self.stdout.write(self.style.WARNING(f"📡 Connexion au Backend Data : {endpoint}"))
 
         try:
-            response = requests.get(endpoint, timeout=10)
-            
+            response = requests.get(endpoint, timeout=15)
             if response.status_code != 200:
-                self.stdout.write(self.style.ERROR(f"❌ Erreur API ({response.status_code}) : {response.text}"))
+                self.stdout.write(self.style.ERROR(f"❌ Erreur API ({response.status_code})"))
                 return
 
             cases_list = response.json()
-            # Si l'API retourne une pagination {results: [...]}, on gère
+            # Gestion pagination DRF standard
             if isinstance(cases_list, dict) and 'results' in cases_list:
                 cases_list = cases_list['results']
-            
-            self.stdout.write(self.style.SUCCESS(f"✅ {len(cases_list)} cas validés trouvés. Début du traitement..."))
 
-            count_created = 0
-            count_updated = 0
+            self.stdout.write(self.style.SUCCESS(f"✅ {len(cases_list)} cas trouvés."))
 
-            for remote_case in cases_list:
-                # --- 1. MAPPING DES DONNÉES ---
-                # On transforme le format "Data Backend" en format "Simulation Backend"
+            count = 0
+            for remote in cases_list:
+                # 1. Filtrage : On ignore les cas marqués "DELETED" ou "REJECTED" si nécessaire
+                # Mais la route s'appelle /validated/, donc on suppose qu'on prend tout ce qui arrive.
                 
-                patient_uuid = remote_case.get('patient_uuid')
-                specialty = remote_case.get('specialite_confirmee', 'Urgence')
+                # 2. Extraction des données
+                uuid = remote.get('patient_uuid')
+                raw_info = remote.get('patient_info_raw') or {}
                 
-                # Extraction des motifs
-                motifs = remote_case.get('motif_consultation', [])
-                primary_motif = "Consultation générale"
-                history_text = ""
+                # Gestion Motifs (Titre)
+                motifs = remote.get('motif_consultation', [])
+                titre_cas = "Consultation Standard"
+                histoire = ""
                 
                 if motifs and len(motifs) > 0:
-                    last_motif = motifs[-1]
-                    primary_motif = last_motif.get('motif', primary_motif)
-                    # On concatène les notes pour faire une description
-                    notes = last_motif.get('notes', [])
-                    for n in notes:
-                        history_text += f"{n.get('contenu', '')} "
+                    premier_motif = motifs[0]
+                    titre_cas = premier_motif.get('motif', titre_cas)
+                    # Concaténation des notes pour le contexte LLM
+                    for note in premier_motif.get('notes', []):
+                        histoire += f"{note.get('contenu', '')} "
 
-                # Titre & Description
-                title = f"{primary_motif}"
-                age = remote_case.get('age_tranche', '?')
-                sexe = remote_case.get('sexe', 'X')
-                
-                description = (
-                    f"Patient(e) (Tranche d'âge: {age}, Sexe: {sexe}). "
-                    f"Motif: {primary_motif}. "
-                    f"Diagnostic confirmé: {remote_case.get('diagnostic_final', 'En cours')}."
-                )
+                # Gestion Spécialité (Mapping important)
+                source_specialty = remote.get('specialite_confirmee', 'general_medicine')
+                mapped_specialty = self._map_specialty(source_specialty)
 
-                # --- 2. CONSTRUCTION DU JSON COMPLEXE (case_data) ---
-                # C'est ce JSON qui sera donné au LLM (Gemini) pour jouer le patient.
-                
-                # Récupération des constantes (on prend les dernières dispos)
-                raw_info = remote_case.get('patient_info_raw', {})
-                vitals_list = raw_info.get('parametresVitaux', [])
-                last_vitals = vitals_list[0] if vitals_list else {}
-                
-                # Mapping des symptômes (venant de l'IA du backend précédent ou bruts)
-                symptomes_mapped = []
-                # Si l'IA du backend précédent a enrichi les données :
-                if motifs:
-                    enrichissement = motifs[-1].get('enrichissement_ia', {})
-                    if enrichissement:
-                        symps_ia = enrichissement.get('symptomes_detectes', [])
-                        if isinstance(symps_ia, list):
-                            for s in symps_ia:
-                                if isinstance(s, str): # Cas simple liste de strings
-                                    symptomes_mapped.append({"nomDuSymptome": s})
-                                elif isinstance(s, dict): # Cas détaillé
-                                    symptomes_mapped.append({
-                                        "nomDuSymptome": s.get('localisation', 'Symptôme'),
-                                        "localisationSymptome": s.get('localisation'),
-                                        "dureeSymptome": s.get('duree'),
-                                        "frequence": s.get('frequence')
-                                    })
+                # Gestion Difficulté (Non fournie, on déduit ou met par défaut)
+                difficulty = "Intermédiaire"
 
-                antecedents_source = remote_case.get('antecedents', {})
-                
-                case_data_structure = {
-                    "codeUUID": patient_uuid,
-                    "ageTranche": age,
-                    "sexe": sexe,
-                    "contexteVrai": history_text.strip(), # Pour aider le LLM a avoir du contexte
-                    "parametresVitaux": {
-                        "FC": str(last_vitals.get('frequenceCardiaqueBpm', '?')),
-                        "TA": str(last_vitals.get('tensionArterielle', '?')),
-                        "Temp": str(last_vitals.get('temperatureCelsius', '?')),
-                        "Poids": str(last_vitals.get('poidsKg', '?')),
-                        "SpO2": "N/A" # Souvent manquant dans Fultang
-                    },
-                    "symptomes": symptomes_mapped,
-                    "antecedentsFamiliaux": antecedents_source.get('antecedentsFamiliaux', 'Non renseigné'),
-                    "allergies": antecedents_source.get('allergies', 'Aucune'),
-                    "maladies": [{"nom": antecedents_source.get('maladiesChroniques', '')}],
-                    "chirurgie": [{"nom": antecedents_source.get('chirurgiesAnterieures', '')}],
-                    "traitementsMedicamenteux": [{"nom": antecedents_source.get('traitementsActuels', '')}],
+                # 3. Construction du JSONB interne (Pour la simulation)
+                # On nettoie et restructure pour notre Frontend
+                case_data_clean = {
+                    "codeUUID": uuid,
+                    "ageTranche": remote.get('age_tranche', '?'),
+                    "sexe": remote.get('sexe', 'X'),
+                    "contexteVrai": histoire.strip(),
+                    "parametresVitaux": self._extract_vitals(raw_info),
+                    "symptomes": self._extract_symptomes(motifs),
+                    "antecedentsFamiliaux": remote.get('antecedents', {}).get('antecedentsFamiliaux', ''),
+                    "allergies": [{"nom": remote.get('antecedents', {}).get('allergies', 'Aucune')}],
+                    "maladies": [{"nom": remote.get('antecedents', {}).get('maladiesChroniques', '')}],
+                    "chirurgie": [{"nom": remote.get('antecedents', {}).get('chirurgiesAnterieures', '')}],
+                    "traitementsMedicamenteux": [{"nom": remote.get('antecedents', {}).get('traitementsActuels', '')}],
                     
-                    # Vérité Terrain
-                    "diagnosticNom": remote_case.get('diagnostic_final'),
-                    "specialiteDiagnostic": specialty,
-                    "examens": remote_case.get('examens', []), # On garde la liste brute
+                    # Vérité terrain
+                    "diagnosticNom": remote.get('diagnostic_final'),
+                    "specialiteDiagnostic": mapped_specialty,
+                    "examens": remote.get('examens', [])
                 }
 
-                # --- 3. SAUVEGARDE EN BDD ---
-                
-                obj, created = ClinicalCase.objects.update_or_create(
-                    uuid=patient_uuid,
+                # 4. Upsert en BDD
+                ClinicalCase.objects.update_or_create(
+                    uuid=uuid,
                     defaults={
-                        "title": title[:255],
-                        "description": description,
-                        "specialty": self._map_specialty(specialty),
-                        "difficulty": "Intermédiaire", # Par défaut, car Fultang ne donne pas la difficulté
-                        "case_data": case_data_structure,
+                        "title": titre_cas[:255],
+                        "description": f"Patient {remote.get('age_tranche')} - {remote.get('sexe')}. {histoire[:100]}...",
+                        "specialty": mapped_specialty,
+                        "difficulty": difficulty,
+                        "case_data": case_data_clean,
                         "is_active": True
                     }
                 )
+                count += 1
 
-                if created:
-                    count_created += 1
-                    self.stdout.write(f"   ➕ Créé: {title}")
-                else:
-                    count_updated += 1
-                    self.stdout.write(f"   🔄 Mis à jour: {title}")
+            self.stdout.write(self.style.SUCCESS(f"🎉 Sync terminée : {count} cas traités."))
 
-            self.stdout.write(self.style.SUCCESS(f"\n🎉 Sync terminée : {count_created} créés, {count_updated} mis à jour."))
-
-        except requests.exceptions.ConnectionError:
-            self.stdout.write(self.style.ERROR(f"❌ Impossible de se connecter à {DATA_BACKEND_URL}. Vérifie que l'autre serveur tourne."))
         except Exception as e:
-            self.stdout.write(self.style.ERROR(f"❌ Erreur inattendue : {e}"))
+            self.stdout.write(self.style.ERROR(f"❌ Erreur : {e}"))
 
-    def _map_specialty(self, source_specialty):
-        """Mappe les spécialités texte libre vers les choix du modèle"""
-        # SPECIALTIES = [('Cardiologie', 'Cardiologie'), ('Pneumologie', 'Pneumologie')...]
-        # On essaie de trouver une correspondance
+    def _map_specialty(self, source):
+        """Mappe 'general_medicine' -> 'Médecine Générale' pour correspondre au modèle Django"""
+        mapping = {
+            "general_medicine": "Médecine Générale",
+            "cardiology": "Cardiologie",
+            "pneumology": "Pneumologie",
+            "gastroenterology": "Gastro-entérologie",
+            "neurology": "Neurologie",
+            "emergency": "Urgence"
+        }
+        # Retourne la valeur mappée ou 'Urgence' par défaut si inconnu
+        return mapping.get(source, "Urgence")
+
+    def _extract_vitals(self, raw_info):
+        # Le JSON montre parametresVitaux comme une liste
+        vitals_list = raw_info.get('parametresVitaux', [])
+        if not vitals_list: return {}
+        last = vitals_list[0] # On prend le plus récent
+        return {
+            "FC": str(last.get('frequenceCardiaqueBpm', '?')),
+            "TA": str(last.get('tensionArterielle', '?')),
+            "Temp": str(last.get('temperatureCelsius', '?')),
+            "SpO2": "N/A" # Pas dans le JSON fourni
+        }
+
+    def _extract_symptomes(self, motifs):
+        symptomes = []
+        if not motifs: return symptomes
         
-        valid_specialties = [
-            'Cardiologie', 'Pneumologie', 'Gastro-entérologie', 
-            'Neurologie', 'Urgence'
-        ]
+        # On regarde dans 'enrichissement_ia'
+        ia_data = motifs[0].get('enrichissement_ia', {})
+        symps_ia = ia_data.get('symptomes_detectes', {})
         
-        if not source_specialty:
-            return 'Urgence'
-            
-        source_clean = source_specialty.capitalize()
-        
-        # Mapping approximatif
-        if "Cardio" in source_clean: return "Cardiologie"
-        if "Pneumo" in source_clean: return "Pneumologie"
-        if "Gastro" in source_clean: return "Gastro-entérologie"
-        if "Neuro" in source_clean: return "Neurologie"
-        
-        if source_clean in valid_specialties:
-            return source_clean
-            
-        return 'Urgence' # Fallback
+        # Le format dans l'exemple est un objet unique, pas une liste ? 
+        # "symptomes_detectes": { "localisation": "..." }
+        # On gère les deux cas (liste ou objet)
+        if isinstance(symps_ia, dict) and symps_ia:
+            symptomes.append({
+                "nomDuSymptome": symps_ia.get('localisation', 'Symptôme'),
+                "localisationSymptome": symps_ia.get('localisation', ''),
+                "dureeSymptome": str(symps_ia.get('duree', '')),
+                "degreDIntensite": str(symps_ia.get('degre_intensite', ''))
+            })
+        elif isinstance(symps_ia, list):
+            for s in symps_ia:
+                symptomes.append({"nomDuSymptome": str(s)})
+                
+        return symptomes

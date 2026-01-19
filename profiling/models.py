@@ -3,6 +3,8 @@ from django.conf import settings
 
 class LearnerProfile(models.Model):
     user = models.OneToOneField(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='profile')
+
+    language = models.CharField(max_length=10, default='fr', verbose_name="Langue préférée")
     
     # --- Etape 1 : Identité ---
     study_level = models.CharField(max_length=50, blank=True, null=True)  # L2, M1, Interne...

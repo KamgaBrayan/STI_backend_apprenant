@@ -5,6 +5,7 @@ class LearnerProfileSerializer(serializers.ModelSerializer):
     class Meta:
         model = LearnerProfile
         fields = [
+            'language',
             'study_level', 'specialty', 'objectives',
             'clinical_experience', 'learning_method', 'challenges',
             'motivation', 'test_score', 'calibrated_level'
