@@ -6,6 +6,7 @@ from .models import LearnerProfile
 from .serializers import LearnerProfileSerializer
 from django.db.models import Avg, Count
 from simulation.models import SimulationSession
+from simulation.llm_tutor import generate_adaptive_test
 
 class UserProfileView(generics.RetrieveUpdateAPIView):
     """
@@ -19,34 +20,68 @@ class UserProfileView(generics.RetrieveUpdateAPIView):
         profile, created = LearnerProfile.objects.get_or_create(user=self.request.user)
         return profile
 
+
+class GenerateTestView(APIView):
+    """
+    Génère un test adaptatif via Gemini (Tuteur) basé sur le profil actuel.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        profile, _ = LearnerProfile.objects.get_or_create(user=request.user)
+        
+        # Prépare les données pour le prompt
+        profile_data = {
+            "study_level": profile.study_level,
+            "specialty": profile.specialty,
+            "objectives": profile.objectives
+        }
+        
+        # Appel au Tuteur IA
+        questions = generate_adaptive_test(profile_data)
+        
+        # On sauvegarde temporairement les bonnes réponses en session pour la correction
+        # (Attention : en production avec plusieurs workers, utiliser Redis ou DB est mieux)
+        request.session['current_test_answers'] = {q['id']: q['correct_answer'] for q in questions}
+        
+        # On retire les réponses de l'objet envoyé au front pour ne pas tricher
+        questions_for_front = []
+        for q in questions:
+            q_copy = q.copy()
+            if 'correct_answer' in q_copy:
+                del q_copy['correct_answer']
+            if 'explanation' in q_copy:
+                del q_copy['explanation']
+            questions_for_front.append(q_copy)
+            
+        return Response(questions_for_front)
+
 class SubmitTestView(APIView):
     """
-    Etape 4 & 5 : Reçoit les réponses du test, calcule le score et met à jour le niveau.
+    Corrige le test en comparant avec les réponses stockées en session.
     """
     permission_classes = [IsAuthenticated]
 
     def post(self, request):
         answers = request.data.get('answers', {})
-        # Logique de correction (Réponses hardcodées basées sur votre fichier en.json du Front)
-        # Q1: ECG (b), Q2: Bradycardie/Hypotension (a ou c selon contexte, disons a), Q3: Pneumothorax (c)
-        # Adaptons selon votre JSON Front : q1->b, q2->b (selon step4/page.tsx), q3->c
+        correct_answers = request.session.get('current_test_answers', {})
         
-        correct_answers = {
-            'q1': 'b', 
-            'q2': 'b', 
-            'q3': 'c'
-        }
-        
+        # Si pas de session (ex: redémarrage serveur), fallback sur une logique simple ou erreur
+        if not correct_answers:
+            # Fallback temporaire pour éviter de bloquer le dev si la session est perdue
+            return Response({"error": "Session de test expirée. Veuillez régénérer le test."}, status=400)
+
         score = 0
         total = len(correct_answers)
 
-        for key, correct_val in correct_answers.items():
-            if answers.get(key) == correct_val:
+        for q_id, user_ans in answers.items():
+            if correct_answers.get(q_id) == user_ans:
                 score += 1
         
-        final_score_percent = (score / total) * 100
+        final_score_percent = (score / total) * 100 if total > 0 else 0
         
-        # Algorithme simple de calibration (STI Logique Moteur)
+        # Calibration (Logique Tuteur simple)
+        # Ici on pourrait rappeler le LLM pour un commentaire personnalisé
         calibrated_level = "Novice"
         if final_score_percent > 80:
             calibrated_level = "Expert"
@@ -62,8 +97,9 @@ class SubmitTestView(APIView):
         return Response({
             "test_score": final_score_percent,
             "calibrated_level": calibrated_level,
-            "message": "Profil calibré avec succès."
+            "message": "Analyse du Tuteur terminée."
         }, status=status.HTTP_200_OK)
+    
 
 
 class DashboardStatsView(APIView):

@@ -26,7 +26,8 @@ class SimulationDetailSerializer(serializers.ModelSerializer):
     messages = ChatMessageSerializer(many=True, read_only=True)
     actions = ActionLogSerializer(many=True, read_only=True)
     case_data = serializers.JSONField(source='clinical_case.case_data', read_only=True)
+    case_title = serializers.CharField(source='clinical_case.title', read_only=True)
 
     class Meta:
         model = SimulationSession
-        fields = ['uuid', 'status', 'messages', 'actions', 'case_data']
+        fields = ['uuid', 'status', 'messages', 'actions', 'case_data', 'score_rime', 'details_rime', 'case_title']

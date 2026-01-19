@@ -10,6 +10,7 @@ from .models import SimulationSession, ChatMessage, ActionLog
 from .serializers import SimulationSessionSerializer, SimulationDetailSerializer, ChatMessageSerializer
 from clinical_cases.models import ClinicalCase
 from .llm_service import get_patient_response_async
+from .llm_tutor import evaluate_session
 
 from rest_framework import generics
 
@@ -105,29 +106,6 @@ class SendMessageView(APIView):
             print(f"Erreur critique View: {e}")
             return Response({"error": "Erreur serveur"}, status=500)
 
-class PerformActionView(APIView):
-    """Enregistre une action (Examen, Diagnostic)"""
-    permission_classes = [IsAuthenticated]
-
-    def post(self, request, session_uuid):
-        session = get_object_or_404(SimulationSession, uuid=session_uuid, user=request.user)
-        
-        action_type = request.data.get('action_type') # 'EXAMEN' ou 'DIAGNOSTIC'
-        details = request.data.get('details') # JSON
-        
-        ActionLog.objects.create(session=session, action_type=action_type, details=details)
-        
-        # Si c'est un diagnostic final, on pourrait fermer la session ici
-        if action_type == 'DIAGNOSTIC_FINAL':
-             session.status = 'TERMINEE'
-             session.end_time = timezone.now()
-             # Calcul score Mock
-             session.score_rime = 85.0 
-             session.details_rime = {"R": 90, "I": 80, "M": 70, "E": 60}
-             session.save()
-
-        return Response({"status": "Action enregistrée"}, status=status.HTTP_200_OK)
-
     
 class HistoryListView(generics.ListAPIView):
     """
@@ -164,3 +142,71 @@ class HistoryListView(generics.ListAPIView):
                 "statut": statut_text
             })
         return Response(data)
+    
+
+class PerformActionView(APIView):
+    """Enregistre une action et déclenche l'évaluation si c'est la fin."""
+    permission_classes = [IsAuthenticated]
+
+    # Helpers asynchrones pour la base de données
+    @sync_to_async
+    def get_session_data(self, session_uuid, user):
+        session = get_object_or_404(SimulationSession, uuid=session_uuid, user=user)
+        # On force le chargement des relations pour éviter les erreurs sync/async
+        case_data = session.clinical_case.case_data
+        
+        # Récupération historique chat
+        chat_msgs = list(session.messages.all().values('role', 'content'))
+        
+        # Récupération historique actions
+        actions = list(session.actions.all().values('action_type', 'details'))
+        
+        return session, case_data, chat_msgs, actions
+
+    @sync_to_async
+    def save_action(self, session, action_type, details):
+        ActionLog.objects.create(session=session, action_type=action_type, details=details)
+
+    @sync_to_async
+    def close_session_with_score(self, session, evaluation):
+        session.status = 'TERMINEE'
+        session.end_time = timezone.now()
+        session.score_rime = evaluation.get('global_score', 0)
+        session.details_rime = evaluation.get('rime_details', {})
+        # On pourrait stocker le feedback_text quelque part, par exemple dans details_rime ou un nouveau champ
+        # Pour l'instant, on l'ajoute dans details_rime pour qu'il soit sauvegardé
+        session.details_rime['feedback_text'] = evaluation.get('feedback_text', "")
+        session.save()
+
+    async def post(self, request, session_uuid):
+        try:
+            action_type = request.data.get('action_type')
+            details = request.data.get('details')
+            
+            # 1. Récupération Session
+            session, case_data, chat_history, actions_log = await self.get_session_data(session_uuid, request.user)
+            
+            # 2. Sauvegarde de l'action courante
+            await self.save_action(session, action_type, details)
+            
+            # 3. Si c'est la fin, on lance le Tuteur
+            if action_type == 'DIAGNOSTIC_FINAL':
+                # On ajoute l'action courante aux logs pour l'évaluation
+                actions_log.append({'type': action_type, 'details': details})
+                
+                # APPEL AU TUTEUR (Prend ~3-5 secondes)
+                evaluation = await sync_to_async(evaluate_session)(case_data, chat_history, actions_log)
+                
+                # Sauvegarde du score
+                await self.close_session_with_score(session, evaluation)
+                
+                return Response({
+                    "status": "Simulation terminée",
+                    "evaluation": evaluation
+                }, status=status.HTTP_200_OK)
+
+            return Response({"status": "Action enregistrée"}, status=status.HTTP_200_OK)
+
+        except Exception as e:
+            print(f"Erreur PerformAction: {e}")
+            return Response({"error": str(e)}, status=500)
