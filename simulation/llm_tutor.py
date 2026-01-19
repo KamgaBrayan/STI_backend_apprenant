@@ -9,7 +9,41 @@ from google.genai import types
 logger = logging.getLogger(__name__)
 
 # On utilise une configuration JSON stricte pour le Tuteur
-client = genai.Client(api_key=settings.GOOGLE_API_KEY)
+# Initialisation du client
+try:
+    client = genai.Client(api_key=settings.GOOGLE_API_KEY)
+except Exception as e:
+    logger.error(f"Erreur init Client Gemini: {e}")
+
+def extract_json_from_text(text):
+    """
+    Extrait un bloc JSON (liste ou objet) d'une chaîne de texte brute
+    même si elle contient du Markdown ```json ... ``` ou du texte autour.
+    """
+    try:
+        # 1. Tentative directe
+        return json.loads(text)
+    except json.JSONDecodeError:
+        pass
+
+    # 2. Recherche de pattern Markdown ```json ... ```
+    match = re.search(r'```json\s*(.*?)\s*```', text, re.DOTALL)
+    if match:
+        try:
+            return json.loads(match.group(1))
+        except json.JSONDecodeError:
+            pass
+
+    # 3. Recherche brute des crochets [...] pour une liste
+    match = re.search(r'\[.*\]', text, re.DOTALL)
+    if match:
+        try:
+            return json.loads(match.group(0))
+        except json.JSONDecodeError:
+            pass
+
+    raise ValueError("Aucun JSON valide trouvé dans la réponse LLM")
+
 
 def generate_adaptive_test(profile_data):
     """
@@ -20,6 +54,7 @@ def generate_adaptive_test(profile_data):
     # 1. Extraction du contexte apprenant
     niveau = profile_data.get('study_level', 'Non défini')
     specialite = profile_data.get('specialty', 'Médecine Générale')
+    objs = profile_data.get('objectives', [])
     objectifs = ", ".join(profile_data.get('objectives', []))
     
     # 2. Prompt Engineering pour le Tuteur
@@ -32,14 +67,14 @@ def generate_adaptive_test(profile_data):
     - Objectifs : {objectifs}
     
     TÂCHE :
-    Génère un Quiz de positionnement de 3 questions à choix multiples (QCM).
+    Génère un Quiz de positionnement de 15 questions à choix multiples (QCM).
     Les questions doivent être adaptées au niveau et à la spécialité.
-    - Question 1 : Diagnostic / Clinique
-    - Question 2 : Pharmacologie / Traitement
-    - Question 3 : Raisonnement / Physiopathologie
+    Chaque question doit avoir 4 options (a, b, c, d) avec une seule bonne réponse.
+    Fournis également une explication brève pour chaque bonne réponse.
     
     FORMAT DE SORTIE ATTENDU (JSON STRICT) :
     Doit être une liste d'objets avec cette structure exacte, sans markdown autour :
+    
     [
         {{
             "id": "q1",
@@ -51,11 +86,13 @@ def generate_adaptive_test(profile_data):
         }},
         ...
     ]
+
+    Ne mets PAS de texte avant ou après le JSON. Fournis uniquement le JSON.
     """
 
     try:
         response = client.models.generate_content(
-            model='gemini-2.0-flash', # Plus intelligent pour suivre des instructions JSON
+            model='gemini-2.5-flash', # Plus intelligent pour suivre des instructions JSON
             contents="Génère le test maintenant.",
             config=types.GenerateContentConfig(
                 system_instruction=system_instruction,
@@ -64,15 +101,17 @@ def generate_adaptive_test(profile_data):
             )
         )
         
+        # Log pour le debug (visible dans Render logs)
+        print(f"DEBUG LLM RAW OUTPUT: {response.text}")
+
         # Nettoyage et parsing
-        content = response.text
-        # Parfois les LLM mettent ```json ... ```, on nettoie au cas où
-        if "```json" in content:
-            content = content.split("```json")[1].split("```")[0]
-        elif "```" in content:
-            content = content.split("```")[1].split("```")[0]
+        content = extract_json_from_text(response.text)
+        
+        # Validation minimale
+        if not isinstance(content, list) or len(content) == 0:
+            raise ValueError("Le LLM a renvoyé un format inattendu (pas une liste)")
             
-        return json.loads(content)
+        return content
 
     except Exception as e:
         logger.error(f"Erreur Tuteur Génération Test : {e}")
@@ -81,7 +120,7 @@ def generate_adaptive_test(profile_data):
             {
                 "id": "q1", 
                 "category": "Général", 
-                "question": "Erreur de génération IA. Quelle est la conduite à tenir ?", 
+                "question": "Erreur de Tuteur pour vous proposer le test. Quelle est la conduite à tenir ?", 
                 "options": {"a": "Réessayer", "b": "Attendre"}, 
                 "correct_answer": "a"
             }
