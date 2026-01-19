@@ -13,9 +13,26 @@ class ClinicalCaseListView(generics.ListAPIView):
 
     def get_queryset(self):
         queryset = ClinicalCase.objects.filter(is_active=True)
-        specialty = self.request.query_params.get('specialty')
-        if specialty:
-            queryset = queryset.filter(specialty=specialty)
+        specialty_param = self.request.query_params.get('specialty')
+        
+        if specialty_param:
+            # Mapping Frontend (slug) -> Backend (Nom BDD)
+            # C'est important car sync_validated_cases.py stocke en Français capitalisé
+            MAPPING = {
+                'cardiology': 'Cardiologie',
+                'pulmonology': 'Pneumologie',
+                'gastroenterology': 'Gastro-entérologie',
+                'neurology': 'Neurologie',
+                'emergency': 'Urgence',
+                'general': 'Médecine Générale'
+            }
+            
+            # On essaie de mapper, sinon on prend la valeur brute
+            target_specialty = MAPPING.get(specialty_param.lower(), specialty_param)
+            
+            # Filtrage insensible à la casse (__iexact)
+            queryset = queryset.filter(specialty__iexact=target_specialty)
+            
         return queryset
 
 class ClinicalCaseDetailView(generics.RetrieveAPIView):

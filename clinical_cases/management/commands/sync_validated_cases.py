@@ -95,18 +95,57 @@ class Command(BaseCommand):
         except Exception as e:
             self.stdout.write(self.style.ERROR(f"❌ Erreur : {e}"))
 
-    def _map_specialty(self, source):
-        """Mappe 'general_medicine' -> 'Médecine Générale' pour correspondre au modèle Django"""
+    def _map_specialty(self, source_specialty):
+        """Mappe les spécialités (FR/EN) vers une liste normalisée en Français."""
+        if not source_specialty:
+            return 'Médecine Générale'
+            
+        source_clean = source_specialty.strip().lower()
+        
+        # Dictionnaire de mapping complet (Basé sur vos nouvelles spécialités)
         mapping = {
+            # Anglais
+            "general medicine": "Médecine Générale",
             "general_medicine": "Médecine Générale",
             "cardiology": "Cardiologie",
-            "pneumology": "Pneumologie",
-            "gastroenterology": "Gastro-entérologie",
+            "dermatology": "Dermatologie",
+            "pediatrics": "Pédiatrie",
             "neurology": "Neurologie",
-            "emergency": "Urgence"
+            "orthopedics": "Orthopédie",
+            "psychiatry": "Psychiatrie",
+            "radiology": "Radiologie",
+            "surgery": "Chirurgie",
+            "gastroenterology": "Gastro-entérologie",
+            "infectiology": "Infectiologie",
+            "endocrinology": "Endocrinologie",
+            
+            # Français (déjà correct ou variations)
+            "médecine générale": "Médecine Générale",
+            "cardiologie": "Cardiologie",
+            "dermatologie": "Dermatologie",
+            "pédiatrie": "Pédiatrie",
+            "neurologie": "Neurologie",
+            "orthopédie": "Orthopédie",
+            "psychiatrie": "Psychiatrie",
+            "radiologie": "Radiologie",
+            "chirurgie": "Chirurgie",
+            "gastro-entérologie": "Gastro-entérologie",
+            "urgence": "Urgence",
+            "infectiologie": "Infectiologie",
+            "endocrinologie": "Endocrinologie"
         }
-        # Retourne la valeur mappée ou 'Urgence' par défaut si inconnu
-        return mapping.get(source, "Urgence")
+        
+        # Retourne la valeur mappée ou 'Médecine Générale' par défaut
+        # On utilise une recherche partielle si la clé exacte n'existe pas
+        if source_clean in mapping:
+            return mapping[source_clean]
+            
+        # Fallback intelligent
+        for key, val in mapping.items():
+            if key in source_clean:
+                return val
+                
+        return "Médecine Générale"
 
     def _extract_vitals(self, raw_info):
         # Le JSON montre parametresVitaux comme une liste

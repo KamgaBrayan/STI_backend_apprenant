@@ -15,11 +15,20 @@ try:
 except Exception as e:
     logger.error(f"Erreur init Client Gemini: {e}")
 
+def get_client():
+    """Récupère le client de manière sécurisée"""
+    api_key = getattr(settings, 'GOOGLE_API_KEY', None)
+    if not api_key:
+        print("⚠️ CLÉ API MANQUANTE")
+        return None
+    return genai.Client(api_key=api_key)
+
 def extract_json_from_text(text):
     """
     Extrait un bloc JSON (liste ou objet) d'une chaîne de texte brute
     même si elle contient du Markdown ```json ... ``` ou du texte autour.
     """
+    text = text.strip()
     try:
         # 1. Tentative directe
         return json.loads(text)
@@ -50,25 +59,44 @@ def generate_adaptive_test(profile_data):
     Génère un QCM adaptatif basé sur le profil de l'étudiant.
     Retourne un JSON strict.
     """
+    client = get_client()
+    if not client:
+        return fallback_questions("Clé API manquante")
     
-    # 1. Extraction du contexte apprenant
-    langue_code = profile_data.get('language', 'fr')
-    langue_verbose = "Français" if langue_code == 'fr' else "Anglais (English)"
-    niveau = profile_data.get('study_level', 'Non défini')
-    specialite = profile_data.get('specialty', 'Médecine Générale')
+    # Gestion de la langue
+    raw_lang = profile_data.get('language', 'fr')
+    langue_instruction = "FRANÇAIS (French)" if raw_lang == 'fr' else "ANGLAIS (English)"
+    
+    # Gestion des objectifs
+    niveau = profile_data.get('study_level', 'Interne')
+    raw_spec = profile_data.get('specialty', 'general')
+    specialty_map = {
+        'cardiology': 'Cardiologie (Cœur, Vaisseaux)',
+        'pulmonology': 'Pneumologie (Poumons, Respiration)',
+        'emergency': 'Médecine d\'Urgence (Soins critiques)',
+        'neurology': 'Neurologie (Cerveau, Système nerveux)',
+        'gastroenterology': 'Gastro-entérologie',
+        'general': 'Médecine Générale'
+    }
+    # On prend le mapping ou la valeur brute si non trouvée, en s'assurant que c'est une string
+    specialite_humaine = specialty_map.get(str(raw_spec).lower(), str(raw_spec))
+
     objs = profile_data.get('objectives', [])
     objectifs = ", ".join(profile_data.get('objectives', []))
     
     # 2. Prompt Engineering pour le Tuteur
     system_instruction = f"""
-    RÔLE : Tu es un Professeur de Médecine Expert chargé d'évaluer un étudiant.
+    RÔLE : Tu es un Professeur de Médecine Expert spécialisé en {specialite_humaine}. Tu es chargé d'évaluer un étudiant.
     
-    CONTEXTE ÉTUDIANT :
-    - Niveau : {niveau}
-    - Spécialité visée : {specialite}
-    - Objectifs : {objectifs}
+    RÈGLES CRITIQUES (NON NÉGOCIABLES) :
+    1. LANGUE DE SORTIE : Tu dois IMPÉRATIVEMENT écrire en {langue_instruction}.
+    2. DOMAINE UNIQUE : Toutes les questions doivent porter EXCLUSIVEMENT sur : {specialite_humaine}.
+       - Si le domaine est 'Cardiologie', ne pose PAS de questions sur une fracture du pied.
+       - Si le domaine est 'Pneumologie', reste sur les poumons/respiration.
+    3. NIVEAU : Adapte la difficulté pour un niveau : {niveau}.
+    4. Objectifs de l'étudiant : {objectifs}
     
-    IMPORTANT : TOUT LE CONTENU GÉNÉRÉ DOIT ÊTRE EN : {langue_verbose.upper()}
+    IMPORTANT : TOUT LE CONTENU GÉNÉRÉ DOIT ÊTRE EN : {langue_instruction.upper()}
 
     TÂCHE :
     Génère un Quiz de positionnement de 15 questions à choix multiples (QCM).

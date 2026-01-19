@@ -9,13 +9,21 @@ class ClinicalCase(models.Model):
     
     # Filtres pour le moteur de recommandation (Redis-like)
     SPECIALTIES = [
+        ('Médecine Générale', 'Médecine Générale'),
         ('Cardiologie', 'Cardiologie'),
-        ('Pneumologie', 'Pneumologie'),
-        ('Gastro-entérologie', 'Gastro-entérologie'),
+        ('Dermatologie', 'Dermatologie'),
+        ('Pédiatrie', 'Pédiatrie'),
         ('Neurologie', 'Neurologie'),
+        ('Orthopédie', 'Orthopédie'),
+        ('Psychiatrie', 'Psychiatrie'),
+        ('Radiologie', 'Radiologie'),
+        ('Chirurgie', 'Chirurgie'),
+        ('Gastro-entérologie', 'Gastro-entérologie'),
         ('Urgence', 'Urgence'),
+        ('Infectiologie', 'Infectiologie'),
+        ('Endocrinologie', 'Endocrinologie'),
     ]
-    specialty = models.CharField(max_length=50, choices=SPECIALTIES)
+    specialty = models.CharField(max_length=50, choices=SPECIALTIES, default='Médecine Générale')
     
     DIFFICULTIES = [
         ('Novice', 'Novice'),
